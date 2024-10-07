@@ -1,2 +1,3 @@
 # Telco---ats_inventory_functions
 Inventory scrambling functions
+These functions apply various procedures to site inventories to make changes to reflect data innaccuracies in the asset tracking database system being simulated. Some functions remove assets from the system. Others move assets from one site to another. Others make qualitative changes to existing asset tags' associated data. Procedures operate at the market, site, employee, and system-wide level (in which case the mistakes are more or less random). The development of functions will be ongoing for many phases as I build the procedure step by step with each step relying on common aspects created in previous steps.
