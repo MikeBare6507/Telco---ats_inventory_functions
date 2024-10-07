@@ -1,0 +1,149 @@
+import psycopg2
+import random
+import os
+from datetime import datetime
+
+# Database connection parameters
+db_params = {
+    'dbname': 'postgis_34_sample',
+    'user': 'postgres',
+    'password': '0624',
+    'host': 'localhost',
+    'port': '5432'
+}
+
+# Path for the log file
+log_dir = r'C:\Users\erabe\OneDrive\Portfolio\TelcoWithPython\Log files'
+current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
+log_file_path = os.path.join(log_dir, f'ats_manipulation_{current_time}.txt')
+
+# Ensure log directory exists
+if not os.path.exists(log_dir):
+    os.makedirs(log_dir)
+
+# Market array
+markets = ["AUSB", "DFWC", "ETXA", "HOUC", "WIMA", "OKCB", "CHIC", "AUSA", "OMAA", "CHIB", "OGAA", 
+           "MNAA", "CHIA", "OKCA", "STLA", "WTXA", "SDAA", "DFWA", "NDAA", "ARKA", "WIMB", "HOUA", 
+           "HOUB", "NOLB", "NOLA", "DFWB", "LAUA", "TULA", "IOWA", "SANB", "KSCB", "SANA", "MNAB", 
+           "STLB", "KSCA"]
+
+# Function to write logs
+def write_log(message):
+    with open(log_file_path, 'a') as log_file:
+        log_file.write(f'{datetime.now()}: {message}\n')
+
+# Connect to PostgreSQL database
+def connect_db():
+    try:
+        conn = psycopg2.connect(**db_params)
+        write_log("Connected to database.")
+        return conn
+    except Exception as e:
+        write_log(f'Error connecting to database: {e}')
+        return None
+
+# Delete function
+def delete_assets(cursor, cid, qty_asset_sel):
+    for _ in range(qty_asset_sel):
+        try:
+            # Select asset_id to delete using ORDER BY RANDOM()
+            cursor.execute("""
+                WITH asset_to_delete AS (
+                    SELECT asset_id
+                    FROM inv_ats_test1
+                    WHERE cid = %s
+                    ORDER BY RANDOM()
+                    LIMIT 1
+                )
+                DELETE FROM inv_ats_test1
+                WHERE asset_id = (SELECT asset_id FROM asset_to_delete)
+                RETURNING asset_id;
+            """, (cid,))
+            asset_id = cursor.fetchone()
+            if asset_id:
+                write_log(f"Deleted asset_id: {asset_id[0]} for cid: {cid}")
+            else:
+                write_log(f"No asset found or deleted for cid: {cid}")
+        except Exception as e:
+            write_log(f"Error deleting asset: {e}")
+
+# CID level manipulation function
+def cid_level(cursor, market):
+    qty_cid_sel = random.randint(0, 50)
+    write_log(f"Market: {market} - {qty_cid_sel} CIDs selected for manipulation.")
+    
+    # Ensure proper SUBSTRING usage and log result
+    cursor.execute("""
+        SELECT DISTINCT cid FROM inv_ats_test1
+        WHERE SUBSTRING(cid, 1, 4) = %s
+    """, (market,))
+    
+    cids = cursor.fetchall()
+    write_log(f"Market: {market} - {len(cids)} CIDs found.")
+
+    if len(cids) == 0:
+        write_log(f"No CIDs found for market: {market}")
+        return
+    
+    # Ensure we do not select more CIDs than available
+    selected_cids = random.sample(cids, min(qty_cid_sel, len(cids)))
+    
+    for cid in selected_cids:
+        qty_asset_sel = random.randint(1, 5)
+        write_log(f"CID: {cid[0]} - Deleting {qty_asset_sel} asset(s).")
+        delete_assets(cursor, cid[0], qty_asset_sel)
+
+# Asset level manipulation function
+def asset_level(cursor, market):
+    write_log(f"Market: {market} - Asset level manipulation without CID involvement.")
+    qty_asset_sel = random.randint(1, 5)
+    delete_assets(cursor, None, qty_asset_sel)
+
+# Market level manipulation function
+def market_level(cursor):
+    qty_mkt_sel = random.randint(1, 20)
+    selected_markets = random.sample(markets, qty_mkt_sel)
+    write_log(f"{qty_mkt_sel} market(s) selected for manipulation: {', '.join(selected_markets)}")
+    
+    for market in selected_markets:
+        if_cid_factor = random.choice([True, False, False])  # 1/3 chance of no CID-level changes
+        if if_cid_factor:
+            cid_level(cursor, market)
+        else:
+            write_log(f"Market: {market} - No CID level changes. Proceeding with asset level.")
+            asset_level(cursor, market)
+
+def main():
+    conn = connect_db()
+    if conn is None:
+        write_log("Connection to the database failed. Exiting.")
+        return
+    
+    cursor = conn.cursor()
+    
+    try:
+        # Determine market-wide changes
+        if_market_factor = random.choice([True, False])  # 50/50 chance for market level manipulation
+        if if_market_factor:
+            write_log("Market-wide changes selected.")
+            market_level(cursor)
+        else:
+            write_log("No market-wide changes. Proceeding to CID level.")
+            market = random.choice(markets)  # Choose a random market for CID-level changes
+            cid_level(cursor, market)
+        
+        conn.commit()  # Commit if all goes well
+        write_log("Changes committed to the database.")
+    except Exception as e:
+        write_log(f"Error during transaction: {e}")
+        conn.rollback()  # Rollback in case of any error
+        write_log("Transaction rolled back.")
+    finally:
+        cursor.close()
+        conn.close()
+        write_log("Database connection closed.")
+
+if __name__ == '__main__':
+    write_log("Script started.")
+    main()
+    write_log("Script finished.")
