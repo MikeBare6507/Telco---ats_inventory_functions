@@ -521,16 +521,21 @@ def asset_add(conn, cid, p_manu):
         logging.info(f"Added new asset - CID: {cid}, Part No: {part_no}, Asset ID: {asset_id}")
 
 def asset_exchange(conn, cid1, cid2):
-# Exchange asset
+    # Exchange asset
     logging.debug(f"Exchanging asset between CID {cid1} and CID {cid2}...")
     
     part_type = select_part_type()
-    part_no = select_part_no(conn, part_type, None)
-    if part_no:
+    asset_id = select_asset_id(conn, part_type, None)  # Assuming a function to select asset_id
+    if asset_id:
         with conn.cursor() as cur:
-            cur.execute("""UPDATE test_ats_output2 SET cid = %s WHERE cid = %s AND part_no = %s""", (cid2, cid1, part_no))
-            conn.commit()  # Commit after the
-        logging.info(f"Exchanged asset - Part No: {part_no}, moved from CID {cid1} to CID {cid2}")
+            cur.execute(
+                """UPDATE test_ats_output2 
+                   SET cid = %s 
+                   WHERE cid = %s AND asset_id = %s""",
+                (cid2, cid1, asset_id)
+            )
+            conn.commit()  # Commit after the change
+        logging.info(f"Exchanged asset - Asset ID: {asset_id}, moved from CID {cid1} to CID {cid2}")
 
 def asset_remove(conn, cid):
 # Remove asset
