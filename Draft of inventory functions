@@ -1,0 +1,711 @@
+import random
+import logging
+import psycopg2
+import string
+import numpy as np
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+#VARIABLES DICTIONARY
+variables = [
+    {"name": "eid", "act_chance": .2},
+    {"name": "team", "act_chance": .3},
+    {
+        "name": "eid_tenure",
+        "act_chance": 0.33,
+        "var_rel_type": {
+            "modes": ["unimodal", "bimodal"],
+            "relations": ["positive", "negative"],
+            "mode_probabilities": {
+                "unimodal": 0.5,
+                "bimodal": 0.5
+            },
+            "relation_probabilities": {
+                "positive": 0.5,
+                "negative": 0.5
+            }
+        }
+    },
+    {"name": "team_tenure",
+    "act_chance": 0.40,
+    "var_rel_type": {
+        "modes": ["unimodal", "bimodal"],
+        "relations": ["positive", "negative"],
+        "mode_probabilities": {
+            "unimodal": 0.5,
+            "bimodal": 0.5
+        },
+        "relation_probabilities": {
+            "positive": 0.5,
+            "negative": 0.5
+        }
+    }
+},
+{
+        "name": "mkt_cidthq",
+        "act_chance": 0.30,
+        "weighted_selection": True,  # Specifies weighted sampling based on mkt_ave_cidthq
+},
+{
+    "name": "mkt_cidtocid",
+    "act_chance": 0.30,
+    "weighted_selection": True  # Specifies weighted sampling based on mkt_ave_cidtocid
+},
+{
+    "name": "eid_cidtocid",
+    "act_chance": 0.30,
+    "weighted_selection": True,  # Specifies weighted sampling based on eid_ave_cidtocid
+},
+{
+    "name": "sweath_fct",
+    "act_chance": 1.00,
+    "weighted_selection": True,  # Enables weighted sampling based on sweath_fct
+}
+
+
+]
+
+# Database connection setup (replace with your own credentials)
+conn = psycopg2.connect(
+    host="localhost",
+    database="postgis_34_sample",
+    user="postgres",
+    password="0624"
+)
+
+
+
+#VARIABLES AND SAMPLING FUNCTIONS
+def handle_eid_tenure(conn):
+    """
+    Process the 'eid_tenure' variable, selecting samples based on specified modes and relationships,
+    and executing related asset processing functions.
+    """
+    logging.info("Handling eid_tenure logic...")
+
+    # Determine mode and relationship based on configured probabilities
+    mode = random.choices(
+        ["unimodal", "bimodal"],
+        weights=[
+            variables[2]["var_rel_type"]["mode_probabilities"]["unimodal"],
+            variables[2]["var_rel_type"]["mode_probabilities"]["bimodal"]
+        ]
+    )[0]
+    logging.info(f"Selected mode for eid_tenure: {mode}")
+
+    if mode == "unimodal":
+        relationship = random.choices(
+            ["positive", "negative"],
+            weights=[
+                variables[2]["var_rel_type"]["relation_probabilities"]["positive"],
+                variables[2]["var_rel_type"]["relation_probabilities"]["negative"]
+            ]
+        )[0]
+        logging.info(f"Fetching sample for {relationship} relationship and {mode} mode")
+        
+        # Fetch and process samples based on the relationship type (positive or negative)
+        eid_sample = get_sample_from_query(
+            conn,
+            "eid",
+            "var_analysis",
+            random.randint(65, 180),
+            condition="eid_tenure >= 10" if relationship == "positive" else "eid_tenure < 10"
+        )
+        
+        for eid in eid_sample:
+            logging.info(f"Processing EID: {eid}")
+            cid_subset = get_related_cid_sample(conn, eid, "eid", random.randint(12, 20))
+            for cid in cid_subset:
+                logging.info(f"Processing CID for eid_tenure: {cid}")
+                process_asset(conn, cid, cid_subset)
+
+    elif mode == "bimodal":
+        logging.info("Fetching samples for bimodal mode...")
+        
+        # Separate samples for positive and negative relationships in bimodal mode
+        positive_sample = get_sample_from_query(
+            conn, "eid", "var_analysis", random.randint(8, 30), condition="eid_tenure >= 10"
+        )
+        negative_sample = get_sample_from_query(
+            conn, "eid", "var_analysis", random.randint(8, 30), condition="eid_tenure < 10"
+        )
+
+        logging.info(f"Selected Positive EIDs: {positive_sample}")
+        logging.info(f"Selected Negative EIDs: {negative_sample}")
+        
+        # Process each EID in both positive and negative samples
+        for eid in positive_sample + negative_sample:
+            logging.info(f"Processing EID: {eid}")
+            cid_subset = get_related_cid_sample(conn, eid, "eid", random.randint(10, 40))
+            for cid in cid_subset:
+                logging.info(f"Processing CID for bimodal mode: {cid}")
+                asset_remove(conn, cid)
+
+
+def get_sample_from_query(conn, column, table, limit, condition=None):
+    logging.debug(f"Preparing query to fetch {column} from {table} with limit {limit} and condition: {condition}")
+    
+    with conn.cursor() as cur:
+        query = f"SELECT {column} FROM (SELECT DISTINCT {column} FROM {table} "
+        if condition:
+            query += f"WHERE {condition} "
+        query += f") AS distinct_query ORDER BY RANDOM() LIMIT %s"
+        cur.execute(query, (limit,))
+        result = cur.fetchall()
+        logging.info(f"Query results for {column}: {result}")
+        return [row[0] for row in result]
+
+def get_related_cid_sample(conn, identifier, identifier_type, sample_size):
+    """
+    Fetch a sample of related CIDs for a given identifier (mkt_id, eid, or cid).
+    
+    Parameters:
+    conn (psycopg2.connection): Database connection object
+    identifier (int): The identifier (mkt_id, eid, or cid) to use for fetching related CIDs
+    identifier_type (str): The type of identifier, either "mkt_id", "eid", or "cid"
+    sample_size (int): The desired sample size of related CIDs to fetch
+    
+    Returns:
+    list: A list of related CID values
+    """
+    logging.debug(f"Fetching related CIDs for {identifier_type}={identifier} with sample size={sample_size}")
+    
+    if identifier_type == "mkt_id":
+        query = "SELECT cid FROM var_analysis WHERE mkt_id = %s LIMIT %s"
+    elif identifier_type == "eid":
+        query = "SELECT cid FROM var_analysis WHERE eid = %s LIMIT %s"
+    elif identifier_type == "cid":
+        #query = "SELECT cid FROM var_analysis WHERE cid = %s LIMIT %s"
+        
+        query = "SELECT cid FROM var_analysis LIMIT %s"
+
+    else:
+        logging.error(f"Invalid identifier type: {identifier_type}")
+        return []
+    
+    with conn.cursor() as cursor:
+        cursor.execute(query, (identifier, sample_size))
+        result = cursor.fetchall()
+        logging.info(f"Fetched CIDs: {result}")
+        return [row[0] for row in result]
+
+
+
+def handle_team_tenure(conn):
+    logging.info("Handling team_tenure logic...")
+
+    # Select mode (unimodal or bimodal) based on defined probabilities
+    mode = random.choices(
+        ["unimodal", "bimodal"],
+        weights=[variables[3]["var_rel_type"]["mode_probabilities"]["unimodal"],
+                 variables[3]["var_rel_type"]["mode_probabilities"]["bimodal"]]
+    )[0]
+    logging.info(f"Selected mode for team_tenure: {mode}")
+
+    if mode == "unimodal":
+        # Select relationship type (positive or negative) within unimodal mode
+        relationship = random.choices(
+            ["positive", "negative"],
+            weights=[variables[3]["var_rel_type"]["relation_probabilities"]["positive"],
+                     variables[3]["var_rel_type"]["relation_probabilities"]["negative"]]
+        )[0]
+        logging.info(f"Fetching sample for {relationship} relationship in {mode} mode")
+
+        # Sample based on selected relationship
+        sample_condition = "mkt_ave_tenure >= 8" if relationship == "positive" else "mkt_ave_tenure < 8"
+        mkt_id_sample = get_sample_from_query(conn, "mkt_id", "var_analysis", random.randint(8, 15), condition=sample_condition)
+        logging.info(f"Selected mkt_id sample for {relationship} team tenure: {mkt_id_sample}")
+
+        for mkt_id in mkt_id_sample:
+            process_team_inventory(conn, mkt_id)
+
+    elif mode == "bimodal":
+        logging.info("Fetching sample for bimodal mode (positive and negative splits)")
+
+        # Separate sampling for positive and negative team tenure
+        positive_sample = get_sample_from_query(conn, "mkt_id", "var_analysis", random.randint(4, 12), condition="mkt_ave_tenure >= 8")
+        negative_sample = get_sample_from_query(conn, "mkt_id", "var_analysis", random.randint(4, 12), condition="mkt_ave_tenure < 8")
+
+        logging.info(f"Selected Positive team tenure mkt_ids: {positive_sample}")
+        logging.info(f"Selected Negative team tenure mkt_ids: {negative_sample}")
+
+        # Process each mkt_id within the positive and negative samples
+        for mkt_id in positive_sample + negative_sample:
+            logging.info(f"Processing mkt_id: {mkt_id}")
+            process_team_inventory(conn, mkt_id)
+
+def process_team_inventory(conn, mkt_id):
+    """Processes CID subset associated with a given mkt_id to model team tenure effects."""
+    cids_to_process = get_related_cid_sample(conn, mkt_id, "mkt_id", random.randint(175, 350))
+    logging.info(f"Processing CID subset for mkt_id {mkt_id}: {cids_to_process}")
+
+    # Perform asset adjustments (or removals) based on CID and team tenure logic
+    for cid in cids_to_process:
+        logging.info(f"Processing CID: {cid}")
+        process_asset(conn, cid, cids_to_process)  # Use the generalized process_asset function
+
+
+
+def handle_mkt_cidthq(conn):
+    """Handles market selection based on mkt_cidthq and processes inventory for selected CIDs."""
+    logging.info("Handling mkt_cidthq logic...")
+
+    # Step 1: Select market IDs based on weighted probability of mkt_ave_cidthq
+    mkt_id_sample = sample_market_ids_with_weights_cidthq(conn)
+    logging.debug(f"Sampled market IDs: {mkt_id_sample}")
+
+    # Step 2: For each selected market, process CIDs in the sample
+    for mkt_id in mkt_id_sample:
+        logging.info(f"Processing market ID: {mkt_id}")
+
+        # Sample a subset of CIDs within this market
+        cid_sample = get_related_cid_sample(conn, mkt_id, "mkt_id", random.randint(175, 400))
+        logging.debug(f"Sampled CIDs for market {mkt_id}: {cid_sample}")
+        
+        # Process assets for each CID in the sample
+        for cid in cid_sample:
+            logging.info(f"Processing asset for CID: {cid}")
+            process_asset(conn, cid, cid_sample)
+
+def sample_market_ids_with_weights_cidthq(conn): 
+    """
+    Retrieves a sample of market IDs weighted by mkt_ave_cidthq values.
+
+    Parameters:
+    conn (psycopg2.connection): Database connection.
+
+    Returns:
+    list: A weighted sample of market IDs.
+    """
+    try:
+        with conn.cursor() as cursor:
+            # Retrieve mkt_id and mkt_ave_cidthq values from the database
+            cursor.execute("SELECT mkt_id, mkt_ave_cidthq FROM var_analysis;")
+            results = cursor.fetchall()
+
+        # Separate mkt_id and weights
+        mkt_ids = [row[0] for row in results]
+        weights = [max(row[1], 0) for row in results]  # Ensure weights are non-negative
+
+        # Generate a random sample size between 200 and 500
+        sample_size = random.randint(200, 500)
+
+        # Check if all weights are zero
+        if sum(weights) == 0:
+            logging.warning("All weights are zero; sampling without weights.")
+            selected_mkt_ids = random.sample(mkt_ids, k=sample_size)
+        else:
+            selected_mkt_ids = random.choices(mkt_ids, weights=weights, k=sample_size)
+        
+        logging.info(f"Selected market IDs based on weighted probabilities: {selected_mkt_ids}")
+        return selected_mkt_ids
+
+    except psycopg2.Error as e:
+        logging.error(f"Database error: {e}")
+        return []
+
+
+def handle_mkt_cidtocid(conn):
+    """Handles market selection based on mkt_cidtocid and processes inventory for selected CIDs."""
+    logging.info("Handling mkt_cidtocid logic...")
+
+    # Step 1: Select market IDs based on weighted probability of mkt_ave_cidtocid
+    mkt_id_sample = sample_market_cids_with_weights_cidtocid(conn)
+    logging.debug(f"Sampled market IDs: {mkt_id_sample}")
+
+    # Step 2: For each selected market, process CIDs in the sample
+    for mkt_id in mkt_id_sample:
+        logging.info(f"Processing market ID: {mkt_id}")
+
+        # Sample a subset of CIDs within this market
+        cid_sample = get_related_cid_sample(conn, mkt_id, "mkt_id", random.randint(140, 292))
+        logging.debug(f"Sampled CIDs for market {mkt_id}: {cid_sample}")
+        
+        # Process assets for each CID in the sample
+        for cid in cid_sample:
+            logging.info(f"Processing asset for CID: {cid}")
+            process_asset(conn, cid, cid_sample)
+
+def sample_market_cids_with_weights_cidtocid(conn):
+    """
+    Retrieves a sample of market IDs weighted by mkt_ave_cidtocid values.
+
+    Parameters:
+    conn (psycopg2.connection): Database connection.
+
+    Returns:
+    list: A weighted sample of market IDs.
+    """
+    try:
+        with conn.cursor() as cursor:
+            # Retrieve mkt_id and mkt_ave_cidtocid values from the database
+            cursor.execute("SELECT mkt_id, mkt_ave_cidtocid FROM var_analysis;")
+            results = cursor.fetchall()
+
+        # Separate mkt_id and weights
+        mkt_ids = [row[0] for row in results]
+        weights = [max(row[1], 0) for row in results]  # Ensure weights are non-negative
+
+        # Generate a random sample size between 100 and 450
+        sample_size = random.randint(200, 450)
+
+        # Select market IDs based on weighted probability
+        if sum(weights) == 0:
+            logging.warning("All weights are zero; sampling without weights.")
+            selected_mkt_ids = random.sample(mkt_ids, k=sample_size)
+        else:
+            selected_mkt_ids = random.choices(mkt_ids, weights=weights, k=sample_size)
+
+        logging.info(f"Selected market IDs based on weighted probabilities: {selected_mkt_ids}")
+        return selected_mkt_ids
+
+    except psycopg2.Error as e:
+        logging.error(f"Database error: {e}")
+        return []
+
+
+def handle_eid_cidtocid(conn):
+    """Handles selection based on eid_cidtocid and processes inventory for selected CIDs."""
+    logging.info("Handling eid_cidtocid logic...")
+
+    # Step 1: Select EIDs based on weighted probability of eid_ave_cidtocid
+    eid_sample = sample_eids_with_weights(conn)
+    logging.debug(f"Sampled EIDs: {eid_sample}")
+
+    # Step 2: For each selected EID, process CIDs in the sample
+    for eid in eid_sample:
+        logging.info(f"Processing eid: {eid}")
+
+        # Sample a subset of CIDs assigned to this eid
+        cids_to_process = get_related_cid_sample(conn, eid, "eid", random.randint(10, 20))
+        logging.debug(f"Sampled CIDs for eid {eid}: {cids_to_process}")
+
+        # Process assets for each CID in the sample
+        for cid in cids_to_process:
+            logging.info(f"Processing asset for CID: {cid}")
+            process_asset(conn, cid, cids_to_process)
+
+def sample_eids_with_weights(conn):
+    """
+    Retrieves a sample of EIDs weighted by eid_ave_cidtocid values.
+
+    Parameters:
+    conn (psycopg2.connection): Database connection.
+
+    Returns:
+    list: A weighted sample of EIDs.
+    """
+    try:
+        with conn.cursor() as cursor:
+            # Retrieve eid and eid_ave_cidtocid values from the database
+            cursor.execute("SELECT eid, eid_ave_cidtocid FROM var_analysis;")
+            results = cursor.fetchall()
+
+        # Separate eids and weights
+        eids = [row[0] for row in results]
+        weights = [max(row[1], 0) for row in results]  # Ensure weights are non-negative
+
+        # Generate a random sample size between 200 and 500
+        sample_size = random.randint(200, 500)
+
+        # Check if all weights are zero
+        if sum(weights) == 0:
+            logging.warning("All weights are zero; sampling without weights.")
+            selected_eids = random.sample(eids, k=sample_size)
+        else:
+            selected_eids = random.choices(eids, weights=weights, k=sample_size)
+
+        logging.info(f"Selected EIDs based on weighted probabilities: {selected_eids}")
+        return selected_eids
+
+    except psycopg2.Error as e:
+        logging.error(f"Database error: {e}")
+        return []
+
+
+def handle_sweath_fct(conn, sample_size):
+    """Handles selection based on sweath_fct and processes inventory for selected CIDs."""
+    logging.info("Handling sweath_fct logic...")
+
+    # Step 1: Select CIDs based on weighted probability of sweath_fct with a specified sample size
+    cids_to_process = sample_cids_with_weights_sweath_fct(conn, sample_size=sample_size)
+    logging.debug(f"Sampled CIDs: {cids_to_process}")
+
+    # Step 2: Process each selected CID
+    for cid in cids_to_process:
+        logging.info(f"Processing CID for sweath_fct: {cid}")
+
+        # Validate CID type
+        if not isinstance(cid, str):
+            logging.error(f"Invalid identifier type: {type(cid).__name__} for CID: {cid}")
+            continue
+
+        
+    try:
+        for cid in cids_to_process:
+            logging.info(f"Testing processing for CID: {cid}")
+            process_asset(conn, cid, cids_to_process)  # Ensure 'process_asset' call has correct parameters
+    except Exception as e:
+        logging.error("Error during sweath_fct test: %s", e)
+
+def sample_cids_with_weights_sweath_fct(conn, sample_size):
+    """
+    Retrieves a weighted sample of CIDs based on sweath_fct values.
+    
+    Parameters:
+    conn (psycopg2.connection): Database connection.
+    sample_size (int): Number of CIDs to sample.
+    
+    Returns:
+    list: A weighted sample of CIDs.
+    """
+    try:
+        with conn.cursor() as cursor:
+            # Retrieve cid and sweath_fct values from the database
+            cursor.execute("SELECT cid, sweath_fct FROM var_analysis;")
+            results = cursor.fetchall()
+
+        # Separate CIDs and weights, converting sweath_fct to float for sampling
+        cids = [row[0] for row in results]
+        weights = [float(row[1]) for row in results]  # Convert sweath_fct from Decimal to float
+
+        # Select CIDs based on weighted probability
+        if sum(weights) == 0:
+            logging.warning("All weights are zero; sampling without weights.")
+            selected_cids = random.sample(cids, k=sample_size)
+        else:
+            selected_cids = random.choices(cids, weights=weights, k=sample_size)
+
+        logging.info(f"Selected CIDs based on weighted probabilities: {selected_cids}")
+        return selected_cids
+
+    except psycopg2.Error as e:
+        logging.error(f"Database error: {e}")
+        return []
+
+
+
+# ASSET MANIPULATION FUNCTIONS
+def process_asset(conn, cid, cids_to_process):
+    # Select a random number of assets to process (between 1 and 9) for each CID
+    num_assets = random.randint(1, 9)
+    logging.info(f"Processing {num_assets} assets for CID: {cid}")
+
+    for _ in range(num_assets):
+        # Choose an action based on the given weights
+        action = random.choices(
+            ['add', 'exchange', 'remove'],
+            weights=[0.3, 0.2, 0.5]
+        )[0]
+
+        if action == 'add':
+            p_manu = "Placeholder_Manufacturer"  # Replace with actual manufacturer if needed
+            asset_add(conn, cid, p_manu)
+        elif action == 'exchange':
+            cid2 = random.choice([other_cid for other_cid in cids_to_process if other_cid != cid])
+            asset_exchange(conn, cid, cid2)
+        elif action == 'remove':
+            asset_remove(conn, cid)
+
+def asset_add(conn, cid, p_manu):
+    logging.debug(f"Adding asset for CID {cid} and manufacturer {p_manu}...")
+    
+    part_type = select_part_type()
+    part_no = select_part_no(conn, part_type, p_manu)
+    if part_no:
+        asset_id = generate_asset_id()
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO test_ats_output2 (cid, part_no, asset_id) VALUES (%s, %s, %s)""", (cid, part_no, asset_id))
+            conn.commit()  # Commit after the
+        logging.info(f"Added new asset - CID: {cid}, Part No: {part_no}, Asset ID: {asset_id}")
+
+def asset_exchange(conn, cid1, cid2):
+# Exchange asset
+    logging.debug(f"Exchanging asset between CID {cid1} and CID {cid2}...")
+    
+    part_type = select_part_type()
+    part_no = select_part_no(conn, part_type, None)
+    if part_no:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE test_ats_output2 SET cid = %s WHERE cid = %s AND part_no = %s""", (cid2, cid1, part_no))
+            conn.commit()  # Commit after the
+        logging.info(f"Exchanged asset - Part No: {part_no}, moved from CID {cid1} to CID {cid2}")
+
+def asset_remove(conn, cid):
+# Remove asset
+    logging.debug(f"Removing asset for CID {cid}...")
+    
+    part_type = select_part_type()
+    part_no = select_part_no(conn, part_type, None)
+    if part_no:
+        with conn.cursor() as cur:
+            cur.execute("""DELETE FROM test_ats_output2 WHERE cid = %s AND part_no = %s""", (cid, part_no))
+            conn.commit()  # Commit after the
+        logging.info(f"Removed asset - CID: {cid}, Part No: {part_no}")
+
+
+def generate_asset_id():
+    # Generate unique asset ID
+    logging.debug("Generating asset ID...")
+    first_two_chars = 'WW'
+    six_digit_number1 = np.random.randint(100000, 999999)
+    random_letter = random.choice(string.ascii_uppercase)
+    five_digit_number2 = np.random.randint(10000, 99999)
+    asset_id = f"{first_two_chars}{six_digit_number1}{random_letter}{five_digit_number2}"
+    logging.info(f"Generated asset ID: {asset_id}")
+    return asset_id
+
+def select_part_type():
+    # Select part type with weighted probabilities
+    logging.debug("Selecting part type based on weighted probabilities...")
+    
+    part_categories = ['RF', 'Periph', 'Telco', 'Infra']
+    weights = [0.91, 0.03, 0.03, 0.03]
+    selected_part_type = random.choices(part_categories, weights=weights)[0]
+    logging.info(f"Selected part type: {selected_part_type}")
+    return selected_part_type
+
+def select_part_no(conn, part_type, p_manu):
+    
+    logging.debug(f"Selecting part number for part type {part_type}...")
+    
+    prefix_conditions = {
+        'RF': ["RFLT%", "RAFL%", "PTRF%"],
+        'Periph': ["AN%", "AC%", "PO%"],
+        'Telco': ["GT%"],
+        'Infra': ["SLT%", "PT-S%"]
+    }
+    prefixes = prefix_conditions.get(part_type, ["RF%"])
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT part_no FROM parts WHERE part_no LIKE ANY(%s)", (prefixes,))
+        parts = [row[0] for row in cur.fetchall()]
+    
+    part_no = random.choice(parts) if parts else None
+    if part_no:
+        logging.info(f"Selected part number: {part_no}")
+    else:
+        logging.warning(f"No part number found for prefixes {prefixes}")
+    return part_no
+
+
+# MAIN FUNCTION to manage the entire process
+def main():
+    """
+    Main process to manage all logic and handle each variable.
+    """
+    try:
+        logging.info("Starting main process...")
+
+        # Sample size ranges for each variable
+        sample_size_params = {
+            "eid": (90, 297),
+            "mkt_id":(1, 20),
+            "eid_tenure":(20, 285),
+            "team": (1, 23),
+            "team_tenure": (2, 16),
+            "mkt_cidthq": (155, 410),
+            "mkt_cidtocid": (155, 410),
+            "eid_cidtocid": (60, 422),
+            "sweath_fct": (4000, 16000)
+        }
+
+       
+
+        # Main loop for handling all variable-related logic
+        for var in variables:
+            # Check if the variable should be activated based on 'act_chance'
+            if random.random() <= var["act_chance"]:
+                logging.info(f"{var['name']} activated")
+            else:
+                logging.info(f"{var['name']} deactivated")
+                continue  # Skip further processing for this variable if not activated
+
+            # Look up the sample size range for the variable
+            sample_size_range = sample_size_params.get(var["name"])
+
+            # If no sample size is provided (None), skip setting sample size
+            if sample_size_range is not None:
+                sample_size = random.randint(*sample_size_range)
+            else:
+                sample_size = None
+
+            if var["name"] == "eid":
+                # Process 'eid' variable
+                eid_sample = get_sample_from_query(conn, "eid", "var_analysis", sample_size or random.randint(90, 297))
+                for eid in eid_sample:
+                    logging.info(f"Processing EID: {eid}")
+                    cid_subset = get_related_cid_sample(conn, eid, "eid", random.randint(13, 20))
+                    for cid in cid_subset:
+                        process_asset(conn, cid, cid_subset)
+
+            elif var["name"] == "eid_tenure":
+                # Process 'eid_tenure' variable
+                logging.debug("Handling eid_tenure logic")
+                handle_eid_tenure(conn)
+
+            elif var["name"] == "team":
+                # Process 'team' variable
+                mkt_ids_sample = get_sample_from_query(conn, "mkt_id", "var_analysis", sample_size or random.randint(0, 5))
+                for mkt_id in mkt_ids_sample:
+                    logging.info(f"Processing mkt_id: {mkt_id}")
+                    cid_subset = get_related_cid_sample(conn, mkt_id, "mkt_id", random.randint(115, 385))
+                    for cid in cid_subset:
+                        logging.info(f"Processing CID: {cid}")
+                        process_asset(conn, cid, cid_subset)
+
+            elif var["name"] == "team_tenure":
+                # Process 'team_tenure' variable
+                logging.info("Processing team tenure...")
+                mkt_ids_sample = get_sample_from_query(conn, "mkt_id", "var_analysis", sample_size or random.randint(0, 5))
+                for mkt_id in mkt_ids_sample:
+                    logging.info(f"Processing mkt_id: {mkt_id}")
+                    cid_subset = get_related_cid_sample(conn, mkt_id, "mkt_id", random.randint(115, 385))
+                    for cid in cid_subset:
+                        logging.info(f"Processing CID: {cid}")
+                        process_asset(conn, cid, cid_subset)
+
+            elif var["name"] == "mkt_cidthq":
+                # Process 'mkt_cidthq' variable
+                logging.debug("Handling mkt_cidthq logic")
+                handle_mkt_cidthq(conn)
+
+            elif var["name"] == "mkt_cidtocid":
+                # Process 'mkt_cidtocid' variable
+                logging.debug("Handling mkt_cidtocid logic")
+                handle_mkt_cidtocid(conn)
+
+            elif var["name"] == "eid_cidtocid":
+                # Process 'eid_cidtocid' variable
+                logging.info("Processing eid_cidtocid...")
+                eids_sample = get_sample_from_query(conn, "eid", "var_analysis", sample_size or random.randint(120, 440))
+                for eid in eids_sample:
+                    logging.info(f"Processing eid for eid_cidtocid: {eid}")
+                    cid_subset = get_related_cid_sample(conn, eid, "eid", random.randint(10, 25))
+                    for cid in cid_subset:
+                        logging.info(f"Processing CID for eid_cidtocid: {cid}")
+                        process_asset(conn, cid, cid_subset)
+
+            elif var["name"] == "sweath_fct":
+                logging.info("Processing sweath_fct...")
+
+                # Use the sample size from the dictionary
+                sample_size_range = sample_size_params.get("sweath_fct", (4000, 16000))
+                sample_size = random.randint(*sample_size_range)
+
+                # Directly call handle_sweath_fct, which will handle the sampling internally
+                handle_sweath_fct(conn, sample_size=sample_size)
+
+    except Exception as e:
+        logging.error(f"Error occurred: {e}")
+    
+    finally:
+        logging.debug("In finally block - closing connection...")
+        if conn:
+            logging.debug(f"Connection status before close: {conn.closed}")
+            conn.close()
+            logging.info("Connection closed")
+
+if __name__ == "__main__":
+    main()
