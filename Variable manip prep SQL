@@ -1,0 +1,15 @@
+SELECT c.cid, c.eid, SUBSTRING(c.cid FROM 1 FOR 4) AS mkt_id, e.tenure AS eid_tenure, m.mkt_ave_tenure, d.mkt_ave_cidtocid, w.sweath_fct 
+FROM 
+cid_eid_key AS c
+LEFT JOIN
+eid_employees AS e
+ON c.eid = e.eid
+LEFT JOIN
+mkt_tenure AS m
+ON SUBSTRING(c.cid FROM 1 FOR 4) = m.mkt_id
+LEFT JOIN
+mkt_cidtocid AS d
+ON m.mkt_id = d.mkt_id
+LEFT JOIN
+cid_wthr_key AS w
+ON c.cid = w.cid;
