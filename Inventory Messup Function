@@ -9,11 +9,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 #VARIABLES DICTIONARY
 variables = [
-    {"name": "eid", "act_chance": 0.0},
-    {"name": "team", "act_chance": 0.0},
+    {"name": "eid", "act_chance": 0.3},
+    {"name": "team", "act_chance": 0.20},
     {
         "name": "eid_tenure",
-        "act_chance": 1.0,
+        "act_chance": .5,
         "var_rel_type": {
             "modes": ["unimodal", "bimodal"],
             "relations": ["positive", "negative"],
@@ -28,7 +28,7 @@ variables = [
         }
     },
     {"name": "team_tenure",
-    "act_chance": 0.00,
+    "act_chance": 0.40,
     "var_rel_type": {
         "modes": ["unimodal", "bimodal"],
         "relations": ["positive", "negative"],
@@ -49,17 +49,17 @@ variables = [
 },
 {
     "name": "mkt_cidtocid",
-    "act_chance": 0.0,
+    "act_chance": 0.25,
     "weighted_selection": True  # Specifies weighted sampling based on mkt_ave_cidtocid
 },
 {
     "name": "eid_cidtocid",
-    "act_chance": 0.00,
+    "act_chance": 0.30,
     "weighted_selection": True,  # Specifies weighted sampling based on eid_ave_cidtocid
 },
 {
     "name": "sweath_fct",
-    "act_chance": 0.00,
+    "act_chance": 1.00,
     "weighted_selection": True,  # Enables weighted sampling based on sweath_fct
 }
 
@@ -101,28 +101,32 @@ def handle_eid_tenure(conn):
 
     logging.info(f"Selected mode: {mode}, relationship: {relationship}")
 
-    # Fetch `eid_tenure` data and assign weights
+    # Fetch `eid_tenure` data
     with conn.cursor() as cursor:
-        cursor.execute("SELECT eid, eid_tenure FROM analysis_inv_input;")
+        cursor.execute("SELECT eid, eid_tenure FROM var_analysis;")
         results = cursor.fetchall()
 
-    eids = [row[0] for row in results]
-    eid_tenures = [float(row[1]) for row in results]  # Convert `eid_tenure` to float to ensure compatibility
+    # Filter out invalid or zero eid_tenure values and synchronize `eids` and `eid_tenures`
+    filtered_results = [(row[0], float(row[1])) for row in results if row[1] and float(row[1]) > 0]
+    eids, eid_tenures = zip(*filtered_results) if filtered_results else ([], [])
+
+    if not eids:
+        logging.error("No valid data available for EIDs or eid_tenure.")
+        return
 
     # Assign weights based on mode and relationship
-    weights = []
     if mode == "unimodal":
         if relationship == "positive":
-            weights = [tenure for tenure in eid_tenures]  # Higher `eid_tenure` gets more weight
+            weights = [tenure for tenure in eid_tenures]
         else:
-            weights = [max(1 / tenure, 0.1) for tenure in eid_tenures]  # Lower `eid_tenure` gets more weight
+            weights = [max(1 / tenure, 0.1) for tenure in eid_tenures]
     elif mode == "bimodal":
         weights = [
             tenure if tenure < 10 or tenure > 20 else max(0.1, 1 / tenure)
             for tenure in eid_tenures
-        ]  # Emphasize low and high values, de-emphasize mid-range
+        ]
 
-    # Normalize weights to avoid sum-zero errors
+    # Normalize weights
     total_weight = sum(weights)
     if total_weight > 0:
         weights = [w / total_weight for w in weights]
@@ -141,7 +145,6 @@ def handle_eid_tenure(conn):
         for cid in cid_subset:
             logging.info(f"Processing CID for eid_tenure: {cid}")
             process_asset(conn, cid, cid_subset)
-
 
 def get_sample_from_query(conn, column, table, limit, condition=None):
     logging.debug(f"Preparing query to fetch {column} from {table} with limit {limit} and condition: {condition}")
@@ -172,24 +175,23 @@ def get_related_cid_sample(conn, identifier, identifier_type, sample_size):
     logging.debug(f"Fetching related CIDs for {identifier_type}={identifier} with sample size={sample_size}")
     
     if identifier_type == "mkt_id":
-        query = "SELECT cid FROM analysis_inv_input WHERE mkt_id = %s LIMIT %s"
+        query = "SELECT cid FROM var_analysis WHERE mkt_id = %s LIMIT %s"
+        params = (identifier, sample_size)
     elif identifier_type == "eid":
-        query = "SELECT cid FROM analysis_inv_input WHERE eid = %s LIMIT %s"
+        query = "SELECT cid FROM var_analysis WHERE eid = %s LIMIT %s"
+        params = (identifier, sample_size)
     elif identifier_type == "cid":
-        #query = "SELECT cid FROM analysis_inv_input WHERE cid = %s LIMIT %s"
-        
-        query = "SELECT cid FROM analysis_inv_input LIMIT %s"
-
+        query = "SELECT cid FROM var_analysis LIMIT %s"
+        params = (sample_size,)  # Only one parameter
     else:
         logging.error(f"Invalid identifier type: {identifier_type}")
         return []
     
     with conn.cursor() as cursor:
-        cursor.execute(query, (identifier, sample_size))
+        cursor.execute(query, params)
         result = cursor.fetchall()
         logging.info(f"Fetched CIDs: {result}")
         return [row[0] for row in result]
-
 
 
 def handle_team_tenure(conn):
@@ -210,7 +212,7 @@ def handle_team_tenure(conn):
     # Retrieve market data and weights from the database
     try:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT mkt_id, mkt_ave_tenure FROM analysis_inv_input;")
+            cursor.execute("SELECT mkt_id, mkt_ave_tenure FROM var_analysis;")
             results = cursor.fetchall()
 
         # Extract market IDs and tenure values
@@ -320,7 +322,7 @@ def sample_market_ids_with_weights_cidthq(conn):
     try:
         with conn.cursor() as cursor:
             # Retrieve mkt_id and mkt_ave_cidthq values from the database
-            cursor.execute("SELECT mkt_id, mkt_ave_cidthq FROM analysis_inv_input;")
+            cursor.execute("SELECT mkt_id, mkt_ave_cidthq FROM var_analysis;")
             results = cursor.fetchall()
 
         # Separate mkt_id and weights
@@ -358,7 +360,7 @@ def handle_mkt_cidtocid(conn):
         logging.info(f"Processing market ID: {mkt_id}")
 
         # Sample a subset of CIDs within this market
-        cid_sample = get_related_cid_sample(conn, mkt_id, "mkt_id", random.randint(140, 600))
+        cid_sample = get_related_cid_sample(conn, mkt_id, "mkt_id", random.randint(140, 400))
         logging.debug(f"Sampled CIDs for market {mkt_id}: {cid_sample}")
         
         # Process assets for each CID in the sample
@@ -379,7 +381,7 @@ def sample_market_cids_with_weights_cidtocid(conn):
     try:
         with conn.cursor() as cursor:
             # Retrieve mkt_id and mkt_ave_cidtocid values from the database
-            cursor.execute("SELECT mkt_id, mkt_ave_cidtocid FROM analysis_inv_input;")
+            cursor.execute("SELECT mkt_id, mkt_ave_cidtocid FROM var_analysis;")
             results = cursor.fetchall()
 
         # Separate mkt_id and weights
@@ -387,7 +389,7 @@ def sample_market_cids_with_weights_cidtocid(conn):
         weights = [max(row[1], 0) for row in results]  # Ensure weights are non-negative
 
         # Generate a random sample size between 100 and 450
-        sample_size = random.randint(300, 600)
+        sample_size = random.randint(20, 100)
 
         # Select market IDs based on weighted probability
         if sum(weights) == 0:
@@ -438,7 +440,7 @@ def sample_eids_with_weights(conn):
     try:
         with conn.cursor() as cursor:
             # Retrieve eid and eid_ave_cidtocid values from the database
-            cursor.execute("SELECT eid, eid_ave_cidtocid FROM analysis_inv_input;")
+            cursor.execute("SELECT eid, eid_ave_cidtocid FROM var_analysis;")
             results = cursor.fetchall()
 
         # Separate eids and weights
@@ -446,7 +448,7 @@ def sample_eids_with_weights(conn):
         weights = [max(row[1], 0) for row in results]  # Ensure weights are non-negative
 
         # Generate a random sample size between 200 and 500
-        sample_size = random.randint(320, 600)
+        sample_size = random.randint(200, 500)
 
         # Check if all weights are zero
         if sum(weights) == 0:
@@ -467,26 +469,25 @@ def handle_sweath_fct(conn, sample_size):
     """Handles selection based on sweath_fct and processes inventory for selected CIDs."""
     logging.info("Handling sweath_fct logic...")
 
-    # Step 1: Select CIDs based on weighted probability of sweath_fct with a specified sample size
-    cids_to_process = sample_cids_with_weights_sweath_fct(conn, sample_size=sample_size)
-    logging.debug(f"Sampled CIDs: {cids_to_process}")
-
-    # Step 2: Process each selected CID
-    for cid in cids_to_process:
-        logging.info(f"Processing CID for sweath_fct: {cid}")
-
-        # Validate CID type
-        if not isinstance(cid, str):
-            logging.error(f"Invalid identifier type: {type(cid).__name__} for CID: {cid}")
-            continue
-
-        
     try:
+        # Step 1: Select CIDs based on weighted probability of sweath_fct with a specified sample size
+        cids_to_process = sample_cids_with_weights_sweath_fct(conn, sample_size=sample_size)
+        logging.debug(f"Sampled CIDs: {cids_to_process}")
+
+        # Step 2: Process each selected CID
         for cid in cids_to_process:
+            logging.info(f"Processing CID for sweath_fct: {cid}")
+
+            # Validate CID type
+            if not isinstance(cid, str):
+                logging.error(f"Invalid identifier type: {type(cid).__name__} for CID: {cid}")
+                continue
+
             logging.info(f"Testing processing for CID: {cid}")
             process_asset(conn, cid, cids_to_process)  # Ensure 'process_asset' call has correct parameters
     except Exception as e:
-        logging.error("Error during sweath_fct test: %s", e)
+        logging.error("Error during sweath_fct test", exc_info=True)
+
 
 def sample_cids_with_weights_sweath_fct(conn, sample_size):
     """
@@ -502,7 +503,7 @@ def sample_cids_with_weights_sweath_fct(conn, sample_size):
     try:
         with conn.cursor() as cursor:
             # Retrieve cid and sweath_fct values from the database
-            cursor.execute("SELECT cid, sweath_fct FROM analysis_inv_input;")
+            cursor.execute("SELECT cid, sweath_fct FROM var_analysis;")
             results = cursor.fetchall()
 
         # Separate CIDs and weights, converting sweath_fct to float for sampling
@@ -528,7 +529,7 @@ def sample_cids_with_weights_sweath_fct(conn, sample_size):
 # ASSET MANIPULATION FUNCTIONS
 def process_asset(conn, cid, cids_to_process):
     # Select a random number of assets to process (between 1 and 5) for each CID
-    num_assets = random.randint(1, 5)
+    num_assets = random.randint(2, 15)
     logging.info(f"Processing {num_assets} assets for CID: {cid}")
 
     # Check the initial count of assets for this cid
@@ -543,7 +544,7 @@ def process_asset(conn, cid, cids_to_process):
         # Choose an action based on the given weights
         action = random.choices(
             ['add', 'exchange', 'remove'],
-            weights=[0.6, 0.1, 0.3]
+            weights=[0.6, 0.05, 0.35]
         )[0]
 
         if action == 'add':
@@ -582,12 +583,25 @@ def asset_add(conn, cid, p_manu):
     
     part_type = select_part_type()
     part_no = select_part_no(conn, part_type, p_manu)
-    if part_no:
-        asset_id = generate_asset_id()
+    if not part_no:
+        logging.error(f"Failed to select part number for part type {part_type} and manufacturer {p_manu}.")
+        return  # Exit function if no part number is found
+
+    asset_id = generate_asset_id()
+    if not asset_id:
+        logging.error("Failed to generate a valid asset ID.")
+        return  # Exit function if no asset ID is generated
+
+    try:
         with conn.cursor() as cur:
-            cur.execute("""INSERT INTO inv_output_uverse (cid, part_no, asset_id) VALUES (%s, %s, %s)""", (cid, part_no, asset_id))
-            conn.commit()  # Commit after the
+            cur.execute(
+                """INSERT INTO inv_output_uverse (cid, part_no, asset_id) VALUES (%s, %s, %s)""",
+                (cid, part_no, asset_id)
+            )
+            conn.commit()
         logging.info(f"Added new asset - CID: {cid}, Part No: {part_no}, Asset ID: {asset_id}")
+    except Exception as e:
+        logging.error(f"Database error during asset addition: {e}")
 
 def asset_exchange(conn, cid1, cid2): 
     """
@@ -605,6 +619,7 @@ def asset_exchange(conn, cid1, cid2):
     with conn.cursor() as cur:
         cur.execute(
             """UPDATE inv_output_uverse
+
                SET cid = %s 
                WHERE cid = %s AND asset_id = %s""",
             (cid2, cid1, asset_id)
@@ -615,16 +630,27 @@ def asset_exchange(conn, cid1, cid2):
     return True  # Indicate a successful exchange
 
 def asset_remove(conn, cid):
-# Remove asset
-    logging.debug(f"Removing asset for CID {cid}...")
-    
-    part_type = select_part_type()
-    part_no = select_part_no(conn, part_type, None)
-    if part_no:
+    logging.debug(f"Removing a random asset for CID {cid}...")
+    try:
         with conn.cursor() as cur:
-            cur.execute("""DELETE FROM inv_output_uverse WHERE cid = %s AND part_no = %s""", (cid, part_no))
-            conn.commit()  # Commit after the
-        logging.info(f"Removed asset - CID: {cid}, Part No: {part_no}")
+            # Fetch all asset_ids for the given CID
+            cur.execute("SELECT asset_id FROM inv_output_uverse WHERE cid = %s", (cid,))
+            asset_ids = [row[0] for row in cur.fetchall()]
+
+            if not asset_ids:
+                logging.error(f"No assets found for CID {cid}. Skipping removal.")
+                return  # Exit if no assets exist for the given CID
+
+            # Randomly select an asset_id to remove
+            asset_id_to_remove = random.choice(asset_ids)
+
+            # Delete the row with the selected asset_id
+            cur.execute("DELETE FROM inv_output_uverse WHERE asset_id = %s", (asset_id_to_remove,))
+            conn.commit()
+        
+        logging.info(f"Removed asset with Asset ID: {asset_id_to_remove} for CID: {cid}")
+    except Exception as e:
+        logging.error(f"Error removing asset for CID {cid}: {e}")
 
 
 
@@ -678,9 +704,12 @@ def select_asset_id(conn, cid):
     
     asset_ids = []
     with conn.cursor() as cur:
-        cur.execute("SELECT asset_id FROM inv_output_uverse WHERE cid = %s", (cid,))
+        # Use a parameterized query to avoid SQL injection
+        query = "SELECT asset_id FROM inv_output_uverse WHERE cid LIKE %s"
+        cur.execute(query, (f"%{cid}%",))  # Add '%' for SQL LIKE matching
         asset_ids = [row[0] for row in cur.fetchall()]
-
+    
+    
     asset_id = random.choice(asset_ids) if asset_ids else None
     if asset_id:
         logging.info(f"Selected asset_id: {asset_id}")
@@ -700,15 +729,15 @@ def main():
 
         # Sample size ranges for each variable
         sample_size_params = {
-            "eid": (190, 497),
-            "mkt_id":(0, 0),
+            "eid": (19, 200),
+            "mkt_id":(1, 10),
             "eid_tenure":(10, 20),
-            "team": (15, 35),
-            "team_tenure": (22, 35),
-            "mkt_cidthq": (10, 410),
+            "team": (8, 15),
+            "team_tenure": (10, 20),
+            "mkt_cidthq": (0,0),
             "mkt_cidtocid": (155, 410),
             "eid_cidtocid": (160, 422),
-            "sweath_fct": (14000, 24000)
+            "sweath_fct": (2000, 14000)
         }
 
        
@@ -733,7 +762,7 @@ def main():
 
             if var["name"] == "eid":
                 # Process 'eid' variable
-                eid_sample = get_sample_from_query(conn, "eid", "analysis_inv_input", sample_size or random.randint(90, 297))
+                eid_sample = get_sample_from_query(conn, "eid", "var_analysis", sample_size or random.randint(90, 297))
                 for eid in eid_sample:
                     logging.info(f"Processing EID: {eid}")
                     cid_subset = get_related_cid_sample(conn, eid, "eid", random.randint(13, 20))
@@ -747,10 +776,10 @@ def main():
 
             elif var["name"] == "team":
                 # Process 'team' variable
-                mkt_ids_sample = get_sample_from_query(conn, "mkt_id", "analysis_inv_input", sample_size or random.randint(0, 5))
+                mkt_ids_sample = get_sample_from_query(conn, "mkt_id", "var_analysis", sample_size or random.randint(0, 5))
                 for mkt_id in mkt_ids_sample:
                     logging.info(f"Processing mkt_id: {mkt_id}")
-                    cid_subset = get_related_cid_sample(conn, mkt_id, "mkt_id", random.randint(15, 35))
+                    cid_subset = get_related_cid_sample(conn, mkt_id, "mkt_id", random.randint(45, 335))
                     for cid in cid_subset:
                         logging.info(f"Processing CID: {cid}")
                         process_asset(conn, cid, cid_subset)
@@ -758,10 +787,10 @@ def main():
             elif var["name"] == "team_tenure":
                 # Process 'team_tenure' variable
                 logging.info("Processing team tenure...")
-                mkt_ids_sample = get_sample_from_query(conn, "mkt_id", "analysis_inv_input", sample_size or random.randint(0, 5))
+                mkt_ids_sample = get_sample_from_query(conn, "mkt_id", "var_analysis", sample_size or random.randint(0, 5))
                 for mkt_id in mkt_ids_sample:
                     logging.info(f"Processing mkt_id: {mkt_id}")
-                    cid_subset = get_related_cid_sample(conn, mkt_id, "mkt_id", random.randint(115, 385))
+                    cid_subset = get_related_cid_sample(conn, mkt_id, "mkt_id", random.randint(115, 485))
                     for cid in cid_subset:
                         logging.info(f"Processing CID: {cid}")
                         process_asset(conn, cid, cid_subset)
@@ -779,7 +808,7 @@ def main():
             elif var["name"] == "eid_cidtocid":
                 # Process 'eid_cidtocid' variable
                 logging.info("Processing eid_cidtocid...")
-                eids_sample = get_sample_from_query(conn, "eid", "analysis_inv_input", sample_size or random.randint(120, 440))
+                eids_sample = get_sample_from_query(conn, "eid", "var_analysis", sample_size or random.randint(120, 440))
                 for eid in eids_sample:
                     logging.info(f"Processing eid for eid_cidtocid: {eid}")
                     cid_subset = get_related_cid_sample(conn, eid, "eid", random.randint(10, 25))
