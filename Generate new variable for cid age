@@ -1,0 +1,78 @@
+import psycopg2
+import random
+from datetime import datetime
+
+# Database connection details
+DB_PARAMS = {
+    'dbname': 'Telco2',
+    'user': 'postgres',
+    'password': '0624',
+    'host': 'localhost',
+    'port': 5432
+}
+
+# Function to calculate mkt_age, cid_birth, and cid_age
+def update_var_cid_age():
+    try:
+        # Connect to the PostgreSQL database
+        conn = psycopg2.connect(**DB_PARAMS)
+        cursor = conn.cursor()
+
+        # Add new columns if they don't exist
+        cursor.execute("""
+            ALTER TABLE var_cid_age
+            ADD COLUMN IF NOT EXISTS mkt_age INTEGER,
+            ADD COLUMN IF NOT EXISTS cid_birth INTEGER,
+            ADD COLUMN IF NOT EXISTS cid_age INTEGER;
+        """)
+        conn.commit()
+
+        # Query all rows from the table
+        cursor.execute("SELECT cid, mkt_id, mkt_birth, mkt_cid_qty, fip, fip_cid_density FROM var_cid_age;")
+        rows = cursor.fetchall()
+
+        # Process rows and calculate the required values
+        updated_rows = []
+        for row in rows:
+            cid, mkt_id, mkt_birth, mkt_cid_qty, fip, fip_cid_density = row
+
+            # Calculate mkt_age (market age in years up to 2020)
+            mkt_age = 2020 - mkt_birth
+
+            # Assign cid_birth
+            # 60% of cids get the market's birth year, weighted by mkt_cid_qty / fip_cid_density
+            if random.random() < 0.6:
+                cid_birth = mkt_birth
+            else:
+                # Remaining cids get a cid_birth between mkt_birth and 2020, weighted by growth rate
+                growth_rate = mkt_cid_qty / (fip_cid_density if fip_cid_density > 0 else 1)
+                years = list(range(mkt_birth, 2021))
+                weights = [growth_rate * random.uniform(0.1, 0.2) for _ in years]
+                cid_birth = random.choices(years, weights=weights, k=1)[0]
+
+            # Calculate cid_age (age in years up to 2020)
+            cid_age = 2020 - cid_birth
+
+            # Prepare the updated row
+            updated_rows.append((cid, mkt_age, cid_birth, cid_age))
+
+        # Update the table with calculated values
+        cursor.executemany("""
+            UPDATE var_cid_age
+            SET mkt_age = %s, cid_birth = %s, cid_age = %s
+            WHERE cid = %s;
+        """, [(mkt_age, cid_birth, cid_age, cid) for cid, mkt_age, cid_birth, cid_age in updated_rows])
+        conn.commit()
+
+        print(f"Updated {len(updated_rows)} rows successfully.")
+
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+
+# Run the script
+if __name__ == "__main__":
+    update_var_cid_age()
