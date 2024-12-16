@@ -6,7 +6,7 @@ from datetime import datetime
 DB_PARAMS = {
     'dbname': 'Telco2',
     'user': 'postgres',
-    'password': '0624',
+    'password': '[password]',   #replace with actual PW
     'host': 'localhost',
     'port': 5432
 }
